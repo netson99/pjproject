@@ -225,14 +225,12 @@ static pj_bool_t on_handshake_complete(pj_ssl_sock_t *ssock,
 	if (status != PJ_SUCCESS) {
 	    /* Handshake failed in accepting, destroy our self silently. */
 
-	    char errmsg[PJ_ERR_MSG_SIZE];
 	    char buf[PJ_INET6_ADDRSTRLEN+10];
 
-	    pj_strerror(status, errmsg, sizeof(errmsg));
-	    PJ_LOG(3,(ssock->pool->obj_name, "Handshake failed in accepting "
-		      "%s: %s",
-		      pj_sockaddr_print(&ssock->rem_addr, buf, sizeof(buf), 3),
-		      errmsg));
+	    PJ_PERROR(3,(ssock->pool->obj_name, status,
+			 "Handshake failed in accepting %s",
+			 pj_sockaddr_print(&ssock->rem_addr, buf,
+					   sizeof(buf), 3)));
 
 	    if (ssock->param.cb.on_accept_complete2) {
 		(*ssock->param.cb.on_accept_complete2) 
@@ -250,6 +248,7 @@ static pj_bool_t on_handshake_complete(pj_ssl_sock_t *ssock,
 #if 1 //(defined(PJ_WIN32) && PJ_WIN32!=0)||(defined(PJ_WIN64) && PJ_WIN64!=0)
 	    if (ssock->param.timer_heap) {
 		pj_time_val interval = {0, PJ_SSL_SOCK_DELAYED_CLOSE_TIMEOUT};
+		pj_status_t status1;
 
 		ssock->ssl_state = SSL_STATE_NULL;
 		ssl_close_sockets(ssock);
@@ -260,11 +259,12 @@ static pj_bool_t on_handshake_complete(pj_ssl_sock_t *ssock,
 		}
 		ssock->timer.id = TIMER_CLOSE;
 		pj_time_val_normalize(&interval);
-		if (pj_timer_heap_schedule(ssock->param.timer_heap, 
-					   &ssock->timer, &interval) != 0)
-		{
-	    	    PJ_LOG(3,(ssock->pool->obj_name, "Failed to schedule "
-		      	      "a delayed close. Race condition may occur."));
+		status1 = pj_timer_heap_schedule(ssock->param.timer_heap, 
+						 &ssock->timer, &interval);
+		if (status1 != PJ_SUCCESS) {
+	    	    PJ_PERROR(3,(ssock->pool->obj_name, status,
+				 "Failed to schedule a delayed close. "
+				 "Race condition may occur."));
 		    ssock->timer.id = TIMER_NONE;
 		    pj_ssl_sock_close(ssock);
 		}
@@ -596,6 +596,27 @@ static void on_timer(pj_timer_heap_t *th, struct pj_timer_entry *te)
     }
 }
 
+
+static void wipe_buf(pj_str_t *buf)
+{
+    volatile char *p = buf->ptr;
+    pj_ssize_t len = buf->slen;
+    while (len--) *p++ = 0;
+    buf->slen = 0;
+}
+
+static void wipe_cert_buffer(pj_ssl_cert_t *cert)
+{
+    wipe_buf(&cert->CA_file);
+    wipe_buf(&cert->CA_path);
+    wipe_buf(&cert->cert_file);
+    wipe_buf(&cert->privkey_file);
+    wipe_buf(&cert->privkey_pass);
+    wipe_buf(&cert->CA_buf);
+    wipe_buf(&cert->cert_buf);
+    wipe_buf(&cert->privkey_buf);
+}
+
 static void ssl_on_destroy(void *arg)
 {
     pj_ssl_sock_t *ssock = (pj_ssl_sock_t*)arg;
@@ -613,7 +634,15 @@ static void ssl_on_destroy(void *arg)
 	ssock->write_mutex = NULL;
     }
 
-    pj_pool_safe_release(&ssock->pool);
+    /* Wipe out cert & key buffer, note that they may not be allocated
+     * using SSL socket memory pool.
+     */
+    if (ssock->cert) {
+	wipe_cert_buffer(ssock->cert);
+    }
+
+    /* Secure release pool, i.e: all memory blocks will be zeroed first */
+    pj_pool_secure_release(&ssock->pool);
 }
 
 
@@ -1479,6 +1508,14 @@ PJ_DEF(pj_status_t) pj_ssl_sock_start_read2 (pj_ssl_sock_t *ssock,
     ssock->read_size = buff_size;
     ssock->read_started = PJ_TRUE;
     ssock->read_flags = flags;
+
+    for (i=0; i<ssock->param.async_cnt; ++i) {
+	if (ssock->asock_rbuf[i]) {
+	    pj_size_t remainder = 0;
+	    asock_on_data_read(ssock->asock, ssock->asock_rbuf[i], 0,
+			       PJ_SUCCESS, &remainder);
+	}
+    }
 
     return PJ_SUCCESS;
 }

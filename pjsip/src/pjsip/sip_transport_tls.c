@@ -162,17 +162,18 @@ static pj_status_t tls_create(struct tls_listener *listener,
 			      const pj_sockaddr *local,
 			      const pj_sockaddr *remote,
 			      const pj_str_t *remote_name,
+			      pj_grp_lock_t *glock,
 			      struct tls_transport **p_tls);
+
+
+/* Clean up TLS resources */
+static void tls_on_destroy(void *arg);
 
 
 static void tls_perror(const char *sender, const char *title,
 		       pj_status_t status)
 {
-    char errmsg[PJ_ERR_MSG_SIZE];
-
-    pj_strerror(status, errmsg, sizeof(errmsg));
-
-    PJ_LOG(3,(sender, "%s: %s [code=%d]", title, errmsg, status));
+    PJ_PERROR(3,(sender, status, "%s: [code=%d]", title, status));
 }
 
 
@@ -671,7 +672,7 @@ static void lis_on_destroy(void *arg)
 
     if (listener->factory.pool) {
 	PJ_LOG(4,(listener->factory.obj_name,  "SIP TLS transport destroyed"));
-	pj_pool_safe_release(&listener->factory.pool);
+	pj_pool_secure_release(&listener->factory.pool);
     }
 }
 
@@ -786,6 +787,7 @@ static pj_status_t tls_create( struct tls_listener *listener,
 			       const pj_sockaddr *local,
 			       const pj_sockaddr *remote,
 			       const pj_str_t *remote_name,
+			       pj_grp_lock_t *glock,
 			       struct tls_transport **p_tls)
 {
     struct tls_transport *tls;
@@ -870,6 +872,11 @@ static pj_status_t tls_create( struct tls_listener *listener,
 
     tls->ssock = ssock;
 
+    /* Set up the group lock */
+    tls->grp_lock = tls->base.grp_lock = glock;
+    pj_grp_lock_add_ref(tls->grp_lock);
+    pj_grp_lock_add_handler(tls->grp_lock, pool, tls, &tls_on_destroy);
+
     /* Register transport to transport manager */
     status = pjsip_transport_register(listener->tpmgr, &tls->base);
     if (status != PJ_SUCCESS) {
@@ -893,7 +900,11 @@ static pj_status_t tls_create( struct tls_listener *listener,
     return PJ_SUCCESS;
 
 on_error:
-    tls_destroy(&tls->base, status);
+    if (tls->grp_lock && pj_grp_lock_get_ref(tls->grp_lock))
+	tls_destroy(&tls->base, status);
+    else
+    	tls_on_destroy(tls);
+
     return status;
 }
 
@@ -959,8 +970,7 @@ static void tls_on_destroy(void *arg)
     struct tls_transport *tls = (struct tls_transport*)arg;
 
     if (tls->rdata.tp_info.pool) {
-	pj_pool_release(tls->rdata.tp_info.pool);
-	tls->rdata.tp_info.pool = NULL;
+	pj_pool_secure_release(&tls->rdata.tp_info.pool);
     }
 
     if (tls->base.lock) {
@@ -974,8 +984,6 @@ static void tls_on_destroy(void *arg)
     }
 
     if (tls->base.pool) {
-	pj_pool_t *pool;
-
 	if (tls->close_reason != PJ_SUCCESS) {
 	    char errmsg[PJ_ERR_MSG_SIZE];
 
@@ -990,10 +998,7 @@ static void tls_on_destroy(void *arg)
 		      "TLS transport destroyed normally"));
 
 	}
-
-	pool = tls->base.pool;
-	tls->base.pool = NULL;
-	pj_pool_release(pool);
+	pj_pool_secure_release(&tls->base.pool);
     }
 }
 
@@ -1048,8 +1053,6 @@ static pj_status_t tls_destroy(pjsip_transport *transport,
 	tls->grp_lock = NULL;
 	pj_grp_lock_dec_ref(grp_lock);
 	/* Transport may have been deleted at this point */
-    } else {
-	tls_on_destroy(tls);
     }
 
     return PJ_SUCCESS;
@@ -1099,9 +1102,8 @@ static pj_status_t tls_start_read(struct tls_transport *tls)
     status = pj_ssl_sock_start_read2(tls->ssock, tls->base.pool, size,
 				     readbuf, 0);
     if (status != PJ_SUCCESS && status != PJ_EPENDING) {
-	PJ_LOG(4, (tls->base.obj_name, 
-		   "pj_ssl_sock_start_read() error, status=%d", 
-		   status));
+	PJ_PERROR(4, (tls->base.obj_name, status,
+		     "pj_ssl_sock_start_read() error"));
 	return status;
     }
 
@@ -1225,19 +1227,12 @@ static pj_status_t lis_create_transport(pjsip_tpfactory *factory,
 
     /* Create the transport descriptor */
     status = tls_create(listener, pool, ssock, PJ_FALSE, &local_addr, 
-			rem_addr, &remote_name, &tls);
-    if (status != PJ_SUCCESS) {
-	pj_grp_lock_destroy(glock);
+			rem_addr, &remote_name, glock, &tls);
+    if (status != PJ_SUCCESS)
 	return status;
-    }
 
     /* Set the "pending" SSL socket user data */
     pj_ssl_sock_set_user_data(tls->ssock, tls);
-
-    /* Set up the group lock */
-    tls->grp_lock = glock;
-    pj_grp_lock_add_ref(tls->grp_lock);
-    pj_grp_lock_add_handler(tls->grp_lock, pool, tls, &tls_on_destroy);
 
     /* Start asynchronous connect() operation */
     tls->has_pending_connect = PJ_TRUE;
@@ -1392,7 +1387,8 @@ static pj_bool_t on_accept_complete2(pj_ssl_sock_t *ssock,
      * Create TLS transport for the new socket.
      */
     status = tls_create( listener, NULL, new_ssock, PJ_TRUE,
-			 &ssl_info.local_addr, &tmp_src_addr, NULL, &tls);
+			 &ssl_info.local_addr, &tmp_src_addr, NULL,
+			 ssl_info.grp_lock, &tls);
     
     if (status != PJ_SUCCESS) {
 	if (listener->tls_setting.on_accept_fail_cb) {
@@ -1408,14 +1404,6 @@ static pj_bool_t on_accept_complete2(pj_ssl_sock_t *ssock,
 
     /* Set the "pending" SSL socket user data */
     pj_ssl_sock_set_user_data(new_ssock, tls);
-
-    /* Set up the group lock */
-    if (ssl_info.grp_lock) {
-	tls->grp_lock = ssl_info.grp_lock;
-	pj_grp_lock_add_ref(tls->grp_lock);
-	pj_grp_lock_add_handler(tls->grp_lock, tls->base.pool, tls,
-				&tls_on_destroy);
-    }
 
     /* Prevent immediate transport destroy as application may access it 
      * (getting info, etc) in transport state notification callback.
@@ -2033,6 +2021,32 @@ static void tls_keep_alive_timer(pj_timer_heap_t *th, pj_timer_entry *e)
     pjsip_endpt_schedule_timer(tls->base.endpt, &tls->ka_timer, 
 			       &delay);
     tls->ka_timer.id = PJ_TRUE;
+}
+
+
+static void wipe_buf(pj_str_t *buf)
+{
+    volatile char *p = buf->ptr;
+    pj_ssize_t len = buf->slen;
+    while (len--) *p++ = 0;
+    buf->slen = 0;
+}
+
+/*
+ * Wipe out certificates and keys in the TLS setting buffer.
+ */
+PJ_DEF(void) pjsip_tls_setting_wipe_keys(pjsip_tls_setting *opt)
+{
+    wipe_buf(&opt->ca_list_file);
+    wipe_buf(&opt->ca_list_path);
+    wipe_buf(&opt->cert_file);
+    wipe_buf(&opt->privkey_file);
+    wipe_buf(&opt->password);
+    wipe_buf(&opt->sigalgs);
+    wipe_buf(&opt->entropy_path);
+    wipe_buf(&opt->ca_buf);
+    wipe_buf(&opt->cert_buf);
+    wipe_buf(&opt->privkey_buf);    
 }
 
 #endif /* PJSIP_HAS_TLS_TRANSPORT */

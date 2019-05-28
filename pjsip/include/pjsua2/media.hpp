@@ -148,7 +148,7 @@ struct ConfPortInfo
 
     /**
      * Array of listeners (in other words, ports where this port is
-     * transmitting to.
+     * transmitting to).
      */
     IntVector		listeners;
 
@@ -195,6 +195,9 @@ private:
     pjmedia_type        type;
 };
 
+/**
+ * Parameters for AudioMedia::startTransmit2() method.
+ */
 struct AudioMediaTransmitParam
 {
     /**
@@ -213,7 +216,22 @@ public:
 };
 
 /**
- * Audio Media.
+ * Audio Media. This is a lite wrapper class for audio conference bridge port,
+ * i.e: this class only maintains one data member, conference slot ID, and 
+ * the methods are simply proxies for conference bridge operations.
+ *
+ * Application can create a derived class and use registerMediaPort2()/
+ * unregisterMediaPort() to register/unregister a media port to/from the
+ * conference bridge.
+ *
+ * The library will not keep a list of AudioMedia instances, so any
+ * AudioMedia (descendant) instances instantiated by application must be
+ * maintained and destroyed by the application itself.
+ *
+ * Note that any PJSUA2 APIs that return AudioMedia instance(s) such as
+ * Endpoint::mediaEnumPorts2() or Call::getAudioMedia() will just return
+ * generated copy. All AudioMedia methods should work normally on this
+ * generated copy instance.
  */
 class AudioMedia : public Media
 {
@@ -320,6 +338,8 @@ public:
     unsigned getTxLevel() const throw(Error);
 
     /**
+     * Warning: deprecated and will be removed in future release.
+     *
      * Typecast from base class Media. This is useful for application written
      * in language that does not support downcasting such as Python.
      *
@@ -330,7 +350,16 @@ public:
     static AudioMedia* typecastFromMedia(Media *media);
 
     /**
-     * Virtual Destructor
+     * Default Constructor.
+     *
+     * Normally application will not create AudioMedia object directly,
+     * but it instantiates an AudioMedia derived class. This is set as public
+     * because some STL vector implementations require it.
+     */
+    AudioMedia();
+
+    /**
+     * Virtual Destructor.
      */
     virtual ~AudioMedia();
 
@@ -342,19 +371,28 @@ protected:
 
 protected:
     /**
-     * Default Constructor.
+     * Warning: deprecated and will be removed in future release, use
+     * registerMediaPort2() instead.
+     *
+     * This method needs to be called by descendants of this class to register
+     * the media port created to the conference bridge and Endpoint's
+     * media list.
+     *
+     * param port  The media port to be registered to the conference bridge.
+     *
      */
-    AudioMedia();
+    void registerMediaPort(MediaPort port) throw(Error);
 
     /**
      * This method needs to be called by descendants of this class to register
      * the media port created to the conference bridge and Endpoint's
      * media list.
      *
-     * param port  the media port to be registered to the conference bridge.
+     * param port  The media port to be registered to the conference bridge.
+     * param pool  The memory pool.
      *
      */
-    void registerMediaPort(MediaPort port) throw(Error);
+    void registerMediaPort2(MediaPort port, pj_pool_t *pool) throw(Error);
 
     /**
      * This method needs to be called by descendants of this class to remove
@@ -365,12 +403,21 @@ protected:
     void unregisterMediaPort();
 
 private:
+    /* Memory pool for deprecated registerMediaPort() */
     pj_caching_pool 	 mediaCachingPool;
     pj_pool_t 		*mediaPool;
 };
 
-/** Array of Audio Media */
+/** 
+ * Warning: deprecated, use AudioMediaVector2 instead.
+ *
+ * Array of Audio Media.
+ */
 typedef std::vector<AudioMedia*> AudioMediaVector;
+
+
+/** Array of Audio Media */
+typedef std::vector<AudioMedia> AudioMediaVector2;
 
 /**
  * This structure contains additional info about AudioMediaPlayer.
@@ -464,6 +511,8 @@ public:
     void setPos(pj_uint32_t samples) throw(Error);
 
     /**
+     * Warning: deprecated and will be removed in future release.
+     *
      * Typecast from base class AudioMedia. This is useful for application
      * written in language that does not support downcasting such as Python.
      *
@@ -474,7 +523,8 @@ public:
     static AudioMediaPlayer* typecastFromAudioMedia(AudioMedia *media);
 
     /**
-     * Destructor.
+     * Destructor. This will unregister the player port from the conference
+     * bridge.
      */
     virtual ~AudioMediaPlayer();
 
@@ -545,10 +595,12 @@ public:
      */
     void createRecorder(const string &file_name,
 			unsigned enc_type=0,
-			pj_ssize_t max_size=0,
+			long max_size=0,
 			unsigned options=0) throw(Error);
 
     /**
+     * Warning: deprecated and will be removed in future release.
+     *
      * Typecast from base class AudioMedia. This is useful for application
      * written in language that does not support downcasting such as Python.
      *
@@ -559,7 +611,8 @@ public:
     static AudioMediaRecorder* typecastFromAudioMedia(AudioMedia *media);
 
     /**
-     * Destructor.
+     * Destructor. This will unregister the recorder port from the conference
+     * bridge.
      */
     virtual ~AudioMediaRecorder();
 
@@ -634,12 +687,13 @@ public:
     ToneGenerator();
 
     /**
-     * Destructor.
+     * Destructor. This will unregister the tone generator port from the
+     * conference bridge.
      */
     ~ToneGenerator();
 
     /**
-     * Create tone generator.
+     * Create tone generator and register the port to the conference bridge.
      */
     void createToneGenerator(unsigned clock_rate = 16000,
 			     unsigned channel_count = 1) throw(Error);
@@ -775,8 +829,15 @@ struct AudioDevInfo
     ~AudioDevInfo();
 };
 
-/** Array of audio device info */
+/** 
+ * Warning: deprecated, use AudioDevInfoVector2 instead.
+ *
+ * Array of audio device info.
+ */
 typedef std::vector<AudioDevInfo*> AudioDevInfoVector;
+
+/** Array of audio device info */
+typedef std::vector<AudioDevInfo> AudioDevInfoVector2;
 
 /**
  * Audio device manager.
@@ -835,11 +896,22 @@ public:
     void setPlaybackDev(int playback_dev) const throw(Error);
 
     /**
-     * Enum all audio devices installed in the system.
+     * Warning: deprecated, use enumDev2 instead. This function is not
+     * safe in multithreaded environment.
+     *
+     * Enum all audio devices installed in the system. This function is not
+     * safe in multithreaded environment.
      *
      * @return			The list of audio device info.
      */
     const AudioDevInfoVector &enumDev() throw(Error);
+
+    /**
+     * Enum all audio devices installed in the system.
+     *
+     * @return			The list of audio device info.
+     */
+    AudioDevInfoVector2 enumDev2() const throw(Error);
 
     /**
      * Set pjsua to use null sound device. The null sound device only provides
@@ -1416,7 +1488,7 @@ class ExtraAudioDevice : public AudioMedia
 {
 public:
     /**
-     * Constructor
+     * Constructor.
      *
      * @param playdev		Playback device ID.
      * @param recdev		Record device ID.
@@ -1424,19 +1496,21 @@ public:
     ExtraAudioDevice(int playdev, int recdev);
 
     /**
-     * Destructor
+     * Destructor.
      */
     virtual ~ExtraAudioDevice();
 
     /**
      * Open the audio device using format (e.g.: clock rate, bit per sample,
      * samples per frame) matched to the conference bridge's format, except
-     * the channel count, which will be set to one (mono channel).
+     * the channel count, which will be set to one (mono channel). This will
+     * also register the audio device port to conference bridge.
      */
     void open();
 
     /**
-     * Close the audio device.
+     * Close the audio device and unregister the audio device port from the
+     * conference bridge.
      */
     void close();
 
@@ -1475,6 +1549,145 @@ struct MediaSize
     unsigned	w;	    /**< The width.	*/
     unsigned 	h;	    /**< The height.	*/
 };
+
+
+/**
+ * This structure descibes information about a particular media port that
+ * has been registered into the conference bridge. 
+ */
+struct VidConfPortInfo
+{
+    /**
+     * Conference port number.
+     */
+    int			portId;
+
+    /**
+     * Port name.
+     */
+    string		name;
+
+    /**
+     * Media audio format information
+     */
+    MediaFormatVideo	format;
+
+    /**
+     * Array of listeners (in other words, ports where this port is
+     * transmitting to).
+     */
+    IntVector		listeners;
+
+    /**
+     * Array of listeners (in other words, ports where this port is
+     * listening to).
+     */
+    IntVector		transmitters;
+
+public:
+    /**
+     * Construct from pjsua_conf_port_info.
+     */
+    void fromPj(const pjsua_vid_conf_port_info &port_info);
+};
+
+/**
+ * Parameters for VideoMedia::startTransmit() method.
+ */
+struct VideoMediaTransmitParam
+{
+};
+
+/**
+ * Video Media.
+ */
+class VideoMedia : public Media
+{
+public:
+    /**
+    * Get information about the specified conference port.
+    */
+    VidConfPortInfo getPortInfo() const throw(Error);
+
+    /**
+     * Get port Id.
+     */
+    int getPortId() const;
+
+    /**
+     * Get information from specific port id.
+     */
+    static VidConfPortInfo getPortInfoFromId(int port_id) throw(Error);
+
+    /**
+     * Establish unidirectional media flow to sink. This media port
+     * will act as a source, and it may transmit to multiple destinations/sink.
+     * And if multiple sources are transmitting to the same sink, the media
+     * will be mixed together. Source and sink may refer to the same Media,
+     * effectively looping the media.
+     *
+     * If bidirectional media flow is desired, application needs to call
+     * this method twice, with the second one called from the opposite source
+     * media.
+     *
+     * @param sink		The destination Media.
+     * @param param		The parameter.
+     */
+    void startTransmit(const VideoMedia &sink, 
+		       const VideoMediaTransmitParam &param) const
+         throw(Error);
+
+    /**
+     *  Stop media flow to destination/sink port.
+     *
+     * @param sink		The destination media.
+     *
+     */
+    void stopTransmit(const VideoMedia &sink) const throw(Error);
+
+    /**
+     * Default Constructor.
+     *
+     * Normally application will not create VideoMedia object directly,
+     * but it instantiates a VideoMedia derived class. This is set as public
+     * because some STL vector implementations require it.
+     */
+    VideoMedia();
+
+    /**
+     * Virtual Destructor
+     */
+    virtual ~VideoMedia();
+
+protected:
+    /**
+     * Conference port Id.
+     */
+    int			 id;
+
+protected:
+    /**
+     * This method needs to be called by descendants of this class to register
+     * the media port created to the conference bridge and Endpoint's
+     * media list.
+     *
+     * param port  The media port to be registered to the conference bridge.
+     * param pool  The memory pool.
+     */
+    void registerMediaPort(MediaPort port, pj_pool_t *pool) throw(Error);
+
+    /**
+     * This method needs to be called by descendants of this class to remove
+     * the media port from the conference bridge and Endpoint's media list.
+     * Descendant should only call this method if it has registered the media
+     * with the previous call to registerMediaPort().
+     */
+    void unregisterMediaPort();
+};
+
+/** Array of Video Media */
+typedef std::vector<VideoMedia> VideoMediaVector;
+
 
 /**
  * Window handle.
@@ -1557,6 +1770,14 @@ public:
      * @return			video window info.
      */
     VideoWindowInfo getInfo() const throw(Error);
+
+    /**
+     * Get video media or conference bridge port of the renderer of
+     * this video window.
+     *
+     * @return			Video media of this renderer window.
+     */
+    VideoMedia getVideoMedia() throw(Error);
     
     /**
      * Show or hide window. This operation is not valid for native windows
@@ -1711,6 +1932,13 @@ public:
      */
     VideoWindow getVideoWindow();
 
+    /**
+     * Get video media or conference bridge port of the video capture device.
+     *
+     * @return			Video media of the video capture device.
+     */
+    VideoMedia getVideoMedia() throw(Error);
+
 private:
     pjmedia_vid_dev_index devId;
 };
@@ -1765,8 +1993,15 @@ struct VideoDevInfo
     ~VideoDevInfo();
 };
 
-/** Array of video device info */
+/** 
+ * Warning: deprecated, use VideoDevInfoVector2 instead.
+ *
+ * Array of video device info.
+ */
 typedef std::vector<VideoDevInfo*> VideoDevInfoVector;
+
+/** Array of video device info */
+typedef std::vector<VideoDevInfo> VideoDevInfoVector2;
 
 /**
  * Parameter for switching device with PJMEDIA_VID_DEV_CAP_SWITCH capability.
@@ -1812,11 +2047,21 @@ public:
     VideoDevInfo getDevInfo(int dev_id) const throw(Error);
 
     /**
+     * Warning: deprecated, use enumDev2() instead. This function is not
+     * safe in multithreaded environment.
+     *
      * Enum all video devices installed in the system.
      *
      * @return		The list of video device info
      */
     const VideoDevInfoVector &enumDev() throw(Error);
+
+    /**
+     * Enum all video devices installed in the system.
+     *
+     * @return		The list of video device info
+     */
+    VideoDevInfoVector2 enumDev2() const throw(Error);
 
     /**
      * Lookup device index based on the driver and device name.
@@ -2055,8 +2300,15 @@ struct CodecInfo
     void fromPj(const pjsua_codec_info &codec_info);
 };
 
-/** Array of codec info */
+/** 
+ * Warning: deprecated, use CodecInfoVector2 instead.
+ *
+ * Array of codec info.
+ */
 typedef std::vector<CodecInfo*> CodecInfoVector;
+
+/** Array of codec info */
+typedef std::vector<CodecInfo> CodecInfoVector2;
 
 /**
  * Structure of codec specific parameters which contains name=value pairs.

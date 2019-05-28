@@ -747,6 +747,26 @@ void call_update_contact(pjsua_call *call, pj_str_t **new_contact)
 	*new_contact = &acc->cfg.force_contact;
     else if (acc->contact.slen)
 	*new_contact = &acc->contact;
+    else {
+	/* Non-registering account */
+	pjsip_dialog *dlg = call->inv->dlg;
+	pj_str_t tmp_contact;
+	pj_status_t status;
+
+	status = pjsua_acc_create_uac_contact(dlg->pool,
+					      &tmp_contact,
+					      acc->index,
+					      &dlg->remote.info_str);
+	if (status == PJ_SUCCESS) {
+	    *new_contact = PJ_POOL_ZALLOC_T(dlg->pool, pj_str_t);
+	    **new_contact = tmp_contact;
+	} else {
+	    PJ_PERROR(3,(THIS_FILE, status,
+			 "Call %d: failed creating contact "
+			 "for contact update", call->index));
+	}
+    }
+
 
     /* When contact is changed, the account transport may have been
      * changed too, so let's update the dialog's transport too.
@@ -1211,7 +1231,7 @@ static pj_status_t verify_request(const pjsua_call *call,
 	status = create_temp_sdp(call->inv->pool_prov, offer, &answer);
 
 	if (status != PJ_SUCCESS) {
-	    err_code = PJSIP_SC_NOT_ACCEPTABLE_HERE;
+	    err_code = PJSIP_SC_INTERNAL_SERVER_ERROR;
 	    pjsua_perror(THIS_FILE, "Error creating SDP answer", status);
 	}
     } else {
@@ -1220,12 +1240,13 @@ static pj_status_t verify_request(const pjsua_call *call,
 						offer, &answer, sip_err_code);
 
 	if (status != PJ_SUCCESS) {
+	    err_code = *sip_err_code;
 	    pjsua_perror(THIS_FILE, "Error creating SDP answer", status);
 	} else {
 	    status = pjsip_inv_set_local_sdp(call->inv, answer);
 	    if (status != PJ_SUCCESS) {
-		pjsua_perror(THIS_FILE, "Error setting local SDP", status);
 		err_code = PJSIP_SC_NOT_ACCEPTABLE_HERE;		
+		pjsua_perror(THIS_FILE, "Error setting local SDP", status);
 	    }
 	}
     }
@@ -1247,11 +1268,12 @@ static pj_status_t verify_request(const pjsua_call *call,
 	    if (response)
 		err_code = (*response)->msg->line.status.code;
 	    else
-		err_code = PJSIP_ERRNO_TO_SIP_STATUS(status);
+		err_code = PJSIP_SC_NOT_ACCEPTABLE_HERE;		
 	}
     }
-    if (sip_err_code)
-	*sip_err_code = err_code;
+
+    if (sip_err_code && status != PJ_SUCCESS)
+	*sip_err_code = err_code? err_code:PJSIP_ERRNO_TO_SIP_STATUS(status);
 
     return status;
 }
@@ -1271,9 +1293,6 @@ on_incoming_call_med_tp_complete2(pjsua_call_id call_id,
     pjsip_tx_data *response = NULL;
 
     PJSUA_LOCK();
-
-    if (sip_err_code)
-	*sip_err_code = err_code;
 
     /* Increment the dialog's lock to prevent it to be destroyed prematurely,
      * such as in case of transport error.
@@ -1301,6 +1320,12 @@ on_incoming_call_med_tp_complete2(pjsua_call_id call_id,
 
 on_return:
     if (status != PJ_SUCCESS) {
+	if (err_code == 0)
+	    err_code = PJSIP_ERRNO_TO_SIP_STATUS(status);
+
+	if (sip_err_code)
+	    *sip_err_code = err_code;
+
         /* If the callback is called from pjsua_call_on_incoming(), the
          * invite's state is PJSIP_INV_STATE_NULL, so the invite session
          * will be terminated later, otherwise we end the session here.
@@ -1339,9 +1364,6 @@ on_return:
     
     pjsip_dlg_dec_lock(dlg);
 
-    if (sip_err_code)
-	*sip_err_code = err_code;
-
     if (tdata)
 	*tdata = response;
     
@@ -1376,7 +1398,7 @@ pj_bool_t pjsua_call_on_incoming(pjsip_rx_data *rdata)
     int call_id = -1;
     int sip_err_code = PJSIP_SC_INTERNAL_SERVER_ERROR;
     pjmedia_sdp_session *offer=NULL;
-    pj_bool_t should_dec_dlg = PJ_TRUE;
+    pj_bool_t should_dec_dlg = PJ_FALSE;
     pj_status_t status;
 
     /* Don't want to handle anything but INVITE */
@@ -1764,6 +1786,7 @@ pj_bool_t pjsua_call_on_incoming(pjsip_rx_data *rdata)
     pj_list_init(&call->async_call.call_var.inc_call.answers);
 
     pjsip_dlg_inc_session(dlg, &pjsua_var.mod);
+    should_dec_dlg = PJ_TRUE;
 
     /* Init media channel, only when there is offer or call replace request.
      * For incoming call without SDP offer, media channel init will be done
@@ -1783,7 +1806,6 @@ pj_bool_t pjsua_call_on_incoming(pjsip_rx_data *rdata)
 
 	    if (response) {
 		pjsip_dlg_send_response(dlg, call->inv->invite_tsx, response);
-
 	    } else {
 		pjsip_dlg_respond(dlg, rdata, sip_err_code, NULL, NULL, NULL);
 	    }
@@ -1993,11 +2015,10 @@ pj_bool_t pjsua_call_on_incoming(pjsip_rx_data *rdata)
     /* This INVITE request has been handled. */
 on_return:
     if (dlg) {
-        pjsip_dlg_dec_lock(dlg);
-    }
+	if (should_dec_dlg)
+	    pjsip_dlg_dec_session(dlg, &pjsua_var.mod);
 
-    if (should_dec_dlg) {
-	pjsip_dlg_dec_session(dlg, &pjsua_var.mod);
+        pjsip_dlg_dec_lock(dlg);
     }
 
     if (call && call->incoming_data) {
@@ -2469,6 +2490,9 @@ on_return:
         if (call->inv->state > PJSIP_INV_STATE_NULL) {
             pjsip_tx_data *tdata;
             pj_status_t status_;
+
+	    if (sip_err_code == 0)
+		sip_err_code = PJSIP_ERRNO_TO_SIP_STATUS(status);
 
 	    status_ = pjsip_inv_end_session(call->inv, sip_err_code, NULL,
                                             &tdata);
@@ -4642,13 +4666,15 @@ static void pjsua_call_on_rx_offer(pjsip_inv_session *inv,
     	    				      (pjsip_rx_data *)param->rdata,
 				      	      100, NULL, NULL, &response);
     	    if (status != PJ_SUCCESS) {
-		PJ_LOG(3, (THIS_FILE, "Failed to create initial answer")); 
+		PJ_PERROR(3, (THIS_FILE, status,
+			      "Failed to create initial answer"));
     	    	goto on_return;
     	    }
 
 	    status = pjsip_inv_send_msg(inv, response);
     	    if (status != PJ_SUCCESS) {
-		PJ_LOG(3, (THIS_FILE, "Failed to send initial answer")); 
+		PJ_PERROR(3, (THIS_FILE, status,
+			      "Failed to send initial answer")); 
     	    	goto on_return;
     	    }
 

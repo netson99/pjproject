@@ -131,9 +131,7 @@ AudioMedia::AudioMedia()
 void AudioMedia::registerMediaPort(MediaPort port) throw(Error)
 {
     /* Check if media already added to Conf bridge. */
-    pj_assert(!Endpoint::instance().mediaExists(*this));
-
-    if (port != NULL) {
+    if (!Endpoint::instance().mediaExists(*this) && port != NULL) {
 	pj_assert(id == PJSUA_INVALID_ID);
 
 	pj_caching_pool_init(&mediaCachingPool, NULL, 0);
@@ -150,6 +148,24 @@ void AudioMedia::registerMediaPort(MediaPort port) throw(Error)
 	}
 
 	PJSUA2_CHECK_EXPR( pjsua_conf_add_port(mediaPool,
+					       (pjmedia_port *)port,
+					       &id) );
+    }
+
+    Endpoint::instance().mediaAdd(*this);
+}
+
+void AudioMedia::registerMediaPort2(MediaPort port, pj_pool_t *pool)
+     throw(Error)
+{
+    /* Check if media already added to Conf bridge. */
+    pj_assert(!Endpoint::instance().mediaExists(*this));
+
+    if (port != NULL) {
+	pj_assert(id == PJSUA_INVALID_ID);
+	pj_assert(pool);
+
+	PJSUA2_CHECK_EXPR( pjsua_conf_add_port(pool,
 					       (pjmedia_port *)port,
 					       &id) );
     }
@@ -175,7 +191,6 @@ void AudioMedia::unregisterMediaPort()
 
 AudioMedia::~AudioMedia() 
 {
-    unregisterMediaPort();
 }
 
 ConfPortInfo AudioMedia::getPortInfo() const throw(Error)
@@ -408,7 +423,7 @@ AudioMediaRecorder::~AudioMediaRecorder()
 
 void AudioMediaRecorder::createRecorder(const string &file_name,
 				        unsigned enc_type,
-				        pj_ssize_t max_size,
+				        long max_size,
 				        unsigned options)
 				        throw(Error)
 {
@@ -480,7 +495,7 @@ void ToneGenerator::createToneGenerator(unsigned clock_rate,
 	PJSUA2_RAISE_ERROR(status);
     }
 
-    registerMediaPort(tonegen);
+    registerMediaPort2(tonegen, pool);
 }
 
 bool ToneGenerator::isBusy() const
@@ -646,6 +661,7 @@ DevAudioMedia::~DevAudioMedia()
 {
     /* Avoid removing this port (conf port id=0) from conference */
     this->id = PJSUA_INVALID_ID;
+    unregisterMediaPort();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -745,6 +761,23 @@ const AudioDevInfoVector &AudDevManager::enumDev() throw(Error)
     }
     pj_leave_critical_section();
     return audioDevList;
+}
+
+AudioDevInfoVector2 AudDevManager::enumDev2() const throw(Error)
+{
+    pjmedia_aud_dev_info pj_info[MAX_DEV_COUNT];
+    unsigned count = MAX_DEV_COUNT;
+    AudioDevInfoVector2 adiv2;
+
+    PJSUA2_CHECK_EXPR( pjsua_enum_aud_devs(pj_info, &count) );
+
+    for (unsigned i = 0; i<count ;++i) {
+	AudioDevInfo di;
+	di.fromPj(pj_info[i]);
+	adiv2.push_back(di);
+    }
+
+    return adiv2;
 }
 
 void AudDevManager::setNullDev() throw(Error)
@@ -1160,7 +1193,26 @@ VideoWindowInfo VideoWindow::getInfo() const throw(Error)
 #endif
     return vwi;
 }
-    
+
+VideoMedia VideoWindow::getVideoMedia() throw(Error)
+{
+#if PJSUA_HAS_VIDEO
+    pjsua_vid_win_info pj_vwi;
+    PJSUA2_CHECK_EXPR( pjsua_vid_win_get_info(winId, &pj_vwi) );
+
+    pjsua_conf_port_id id = pj_vwi.slot_id;
+    if (id != PJSUA_INVALID_ID) {
+	VideoMediaHelper vm;
+	vm.setPortId(id);
+	return vm;
+    } else {
+	PJSUA2_RAISE_ERROR(PJ_ENOTFOUND);
+    }
+#else
+    PJSUA2_RAISE_ERROR(PJ_EINVALIDOP);
+#endif
+}
+
 void VideoWindow::Show(bool show) throw(Error)
 {
 #if PJSUA_HAS_VIDEO
@@ -1301,6 +1353,22 @@ VideoWindow VideoPreview::getVideoWindow()
 #endif
 }
 
+VideoMedia VideoPreview::getVideoMedia() throw(Error)
+{
+#if PJSUA_HAS_VIDEO
+    pjsua_conf_port_id id = pjsua_vid_preview_get_vid_conf_port(devId);
+    if (id != PJSUA_INVALID_ID) {
+	VideoMediaHelper vm;
+	vm.setPortId(id);
+	return vm;
+    } else {
+	PJSUA2_RAISE_ERROR2(PJ_EINVALIDOP, "Preview not started");
+    }
+#else
+    PJSUA2_RAISE_ERROR(PJ_EINVALIDOP);
+#endif
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 void MediaFormatVideo::fromPj(const pjmedia_format &format)
 {
@@ -1424,6 +1492,24 @@ const VideoDevInfoVector &VidDevManager::enumDev() throw(Error)
     pj_leave_critical_section();
 #endif
     return videoDevList;
+}
+
+VideoDevInfoVector2 VidDevManager::enumDev2() const throw(Error)
+{
+    VideoDevInfoVector2 vdiv2;
+#if PJSUA_HAS_VIDEO
+    pjmedia_vid_dev_info pj_info[MAX_DEV_COUNT];
+    unsigned count = MAX_DEV_COUNT;
+
+    PJSUA2_CHECK_EXPR(pjsua_vid_enum_devs(pj_info, &count));
+
+    for (unsigned i = 0; i<count;++i) {
+	VideoDevInfo vdi;
+	vdi.fromPj(pj_info[i]);
+	vdiv2.push_back(vdi);
+    }
+#endif
+    return vdiv2;
 }
 
 int VidDevManager::lookupDev(const string &drv_name,
@@ -1755,3 +1841,115 @@ void MediaEvent::fromPj(const pjmedia_event &ev)
     pjMediaEvent = (void *)&ev;
 }
 
+
+///////////////////////////////////////////////////////////////////////////////
+
+void VidConfPortInfo::fromPj(const pjsua_vid_conf_port_info &port_info)
+{
+    portId = port_info.slot_id;
+    name = pj2Str(port_info.name);
+    format.fromPj(port_info.format);
+    listeners.clear();
+    for (unsigned i=0; i<port_info.listener_cnt; ++i) {
+	listeners.push_back(port_info.listeners[i]);
+    }
+    transmitters.clear();
+    for (unsigned i=0; i<port_info.transmitter_cnt; ++i) {
+	transmitters.push_back(port_info.transmitters[i]);
+    }
+}
+
+VideoMedia::VideoMedia() 
+: Media(PJMEDIA_TYPE_VIDEO), id(PJSUA_INVALID_ID)
+{
+
+}
+
+void VideoMedia::registerMediaPort(MediaPort port, pj_pool_t *pool)
+     throw(Error)
+{
+#if PJSUA_HAS_VIDEO
+    if (!pool) {
+	PJSUA2_RAISE_ERROR3(PJ_EINVAL, "registerMediaPort()",
+			    "pool must be supplied");
+    }
+    if (!port) {
+	PJSUA2_RAISE_ERROR3(PJ_EINVAL, "registerMediaPort()",
+			    "port must be supplied");
+    }
+    if (id != PJSUA_INVALID_ID) {
+	PJSUA2_RAISE_ERROR3(PJ_EINVALIDOP, "registerMediaPort()",
+			    "VideoMedia is occupied");
+    }
+
+    PJSUA2_CHECK_EXPR( pjsua_vid_conf_add_port(pool,
+					       (pjmedia_port*)port, NULL,
+					       &id) );
+#else
+    PJ_UNUSED_ARG(port);
+    PJ_UNUSED_ARG(pool);
+    PJSUA2_RAISE_ERROR(PJ_EINVALIDOP);
+#endif
+}
+
+void VideoMedia::unregisterMediaPort()
+{
+#if PJSUA_HAS_VIDEO
+    if (id != PJSUA_INVALID_ID) {
+	pjsua_vid_conf_remove_port(id);
+	id = PJSUA_INVALID_ID;
+    }
+#endif
+}
+
+VideoMedia::~VideoMedia() 
+{
+}
+
+VidConfPortInfo VideoMedia::getPortInfo() const throw(Error)
+{
+    return VideoMedia::getPortInfoFromId(id);
+}
+
+int VideoMedia::getPortId() const
+{
+    return id;
+}
+
+VidConfPortInfo VideoMedia::getPortInfoFromId(int port_id) throw(Error)
+{
+#if PJSUA_HAS_VIDEO
+    pjsua_vid_conf_port_info pj_info;
+    VidConfPortInfo pi;
+
+    PJSUA2_CHECK_EXPR( pjsua_vid_conf_get_port_info(port_id, &pj_info) );
+    pi.fromPj(pj_info);
+    return pi;
+#else
+    PJ_UNUSED_ARG(port_id);
+    PJSUA2_RAISE_ERROR(PJ_EINVALIDOP);
+#endif
+}
+
+void VideoMedia::startTransmit(const VideoMedia &sink,
+			       const VideoMediaTransmitParam &param) const
+     throw(Error)
+{
+    PJ_UNUSED_ARG(param);
+#if PJSUA_HAS_VIDEO
+    PJSUA2_CHECK_EXPR( pjsua_vid_conf_connect(id, sink.id, NULL) );
+#else
+    PJ_UNUSED_ARG(sink);
+    PJSUA2_RAISE_ERROR(PJ_EINVALIDOP);
+#endif
+}
+
+void VideoMedia::stopTransmit(const VideoMedia &sink) const throw(Error)
+{
+#if PJSUA_HAS_VIDEO
+    PJSUA2_CHECK_EXPR( pjsua_vid_conf_disconnect(id, sink.id) );
+#else
+    PJ_UNUSED_ARG(sink);
+    PJSUA2_RAISE_ERROR(PJ_EINVALIDOP);
+#endif
+}
